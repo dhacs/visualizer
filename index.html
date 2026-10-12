@@ -1,0 +1,267 @@
+<!doctype html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hand Player</title>
+<link rel="stylesheet" href="https://unpkg.com/98.css">
+<style>
+  body {
+    margin: 0; min-height: 100vh;
+    display: flex; align-items: center; justify-content: center;
+    background: #008080; 
+  }
+  .window { width: min(96vw, 1100px); }
+
+  .menubar { display: flex; gap: 2px; padding: 2px 0 4px; }
+  .menubar span { padding: 2px 6px; cursor: default; }
+  .menubar span:hover { background: #000080; color: #fff; }
+
+  .screen {
+    position: relative; aspect-ratio: 16 / 9; background: #000;
+    box-shadow: inset -1px -1px #fff, inset 1px 1px #808080,
+                inset -2px -2px #dfdfdf, inset 2px 2px #0a0a0a;
+    padding: 2px; box-sizing: border-box;
+  }
+  #c { width: 100%; height: 100%; display: block; object-fit: cover; }
+  #overlay {
+    position: absolute; inset: 2px;
+    display: flex; align-items: center; justify-content: center;
+    background: #000; color: #c0c0c0; font-size: 14px;
+  }
+
+  .controls {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 12px; padding: 8px 2px 6px;
+  }
+  .controls .field-row { flex: 1; max-width: 300px; margin: 0; }
+  .controls input[type="range"] { flex: 1; }
+</style>
+</head>
+<body>
+
+<div class="window">
+  <div class="title-bar">
+    <div class="title-bar-text">Media Player - madebydvlan.avi</div>
+    <div class="title-bar-controls">
+      <button aria-label="Minimize"></button>
+      <button aria-label="Maximize"></button>
+      <button aria-label="Close"></button>
+    </div>
+  </div>
+
+  <div class="window-body">
+    <div class="menubar">
+      <span>File</span><span>View</span><span>Play</span><span>Favorites</span><span>Help</span>
+      <span><a href="https://www.linkedin.com/in/dylanxha/" target="_blank" rel="noopener">LinkedIn</a></span>
+      <span><a href="https://github.com/dhacs" target="_blank" rel="noopener">GitHub</a></span>
+    </div>
+
+    <div class="screen">
+      <canvas id="c"></canvas>
+      <div id="overlay">Click Start to begin.</div>
+    </div>
+
+    <div class="controls">
+      <button id="start">▶ Start</button>
+      <div class="field-row">
+        <label for="volume">Volume:</label>
+        <input id="volume" type="range" min="0" max="1" step="0.01" value="0.8">
+      </div>
+    </div>
+  </div>
+
+  <div class="status-bar">
+    <p class="status-bar-field" id="status">Ready</p>
+    <p class="status-bar-field" id="volText">Vol: 80%</p>
+  </div>
+</div>
+
+<video id="v" playsinline style="display:none"></video>
+
+<script type="module">
+import { FilesetResolver, HandLandmarker } from
+  "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
+
+const THUMB = 4, INDEX = 8;
+const MIN_DIST = 40;  
+const SMOOTH = 0.5;    // 0 = no smoothing, closer to 1 = smoother/laggier
+
+const video = document.getElementById("v");
+const canvas = document.getElementById("c");
+const ctx = canvas.getContext("2d");
+const overlay = document.getElementById("overlay");
+const startBtn = document.getElementById("start");
+const statusEl = document.getElementById("status");
+const volume = document.getElementById("volume");
+const volText = document.getElementById("volText");
+
+// videos go here 
+// "videos/shelter2.mp4", 
+// "videos/wish.mp4",
+const VIDEO_FILES = ["videos/music.mp4", 
+"videos/wanna.mp4",
+"videos/unfold.mp4", 
+"videos/rr.mp4"
+];
+
+const clips = VIDEO_FILES.map(src => {
+  const v = document.createElement("video");
+  v.src = src;
+  v.loop = true;
+  v.playsInline = true;
+  v.preload = "auto";
+  return v;
+});
+let clip = clips[0];
+let showing = false;
+
+// random video, never the same one twice in a row
+let queue = [];
+function pickClip() {
+  if (queue.length === 0) {
+    queue = [...clips];
+    for (let i = queue.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [queue[i], queue[j]] = [queue[j], queue[i]];
+    }
+  const last = queue.length - 1;
+  if (last > 0 && queue[last] === clip) [queue[0], queue[last]] = [queue[last], queue[0]];
+  }
+  return queue.pop();
+}
+
+// volume slider
+function setVolume() {
+  for (const c of clips) c.volume = volume.value;
+  volText.textContent = "Vol: " + Math.round(volume.value * 100) + "%";
+}
+volume.oninput = setVolume;
+setVolume();
+
+// start downloading the hand model right away
+const handsReady = (async () => {
+  const fileset = await FilesetResolver.forVisionTasks(
+    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
+  return HandLandmarker.createFromOptions(fileset, {
+    baseOptions: {
+      modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+      delegate: "GPU",
+    },
+    runningMode: "VIDEO",
+    numHands: 2,
+  });
+})();
+let hands;
+
+startBtn.onclick = async () => {
+  startBtn.disabled = true;
+  statusEl.textContent = "Loading…";
+  try {
+    // use this click to unlock sound on every clip
+    for (const c of clips) {
+      try { await c.play(); c.pause(); c.currentTime = 0; } catch {}
+    }
+
+    hands = await handsReady;
+    video.srcObject = await navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720 } });
+    await video.play();
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+
+    overlay.style.display = "none";
+    startBtn.textContent = "■ Running";
+    statusEl.textContent = "Stopped";
+    loop();
+  } catch (err) {
+    statusEl.textContent = "Error: " + err.message;
+    startBtn.disabled = false;
+  }
+};
+
+const prev = {};
+function point(lm, idx, key) {
+  const raw = { x: (1 - lm[idx].x) * canvas.width, y: lm[idx].y * canvas.height }; // mirrored
+  const p = prev[key]
+    ? { x: prev[key].x * SMOOTH + raw.x * (1 - SMOOTH), y: prev[key].y * SMOOTH + raw.y * (1 - SMOOTH) }
+    : raw;
+  return (prev[key] = p);
+}
+
+function drawLine(a, b, color) {
+  if (!a || !b || Math.hypot(a.x - b.x, a.y - b.y) < MIN_DIST) return;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 3;
+  ctx.shadowColor = color;
+  ctx.shadowBlur = 20;
+  ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+}
+
+function far(a, b) {
+  return a && b && Math.hypot(a.x - b.x, a.y - b.y) >= MIN_DIST;
+}
+
+function drawImageInShape(pts) {
+  if (clip.readyState < 2) return; // no frame ready yet
+  const xs = pts.map(p => p.x), ys = pts.map(p => p.y);
+  const minX = Math.min(...xs), minY = Math.min(...ys);
+  const w = Math.max(...xs) - minX, h = Math.max(...ys) - minY;
+  if (w < 1 || h < 1) return;
+
+  const scale = Math.max(w / clip.videoWidth, h / clip.videoHeight);
+  const iw = clip.videoWidth * scale, ih = clip.videoHeight * scale;
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(pts[0].x, pts[0].y);
+  for (const p of pts.slice(1)) ctx.lineTo(p.x, p.y);
+  ctx.closePath();
+  ctx.clip();
+  ctx.drawImage(clip, minX + (w - iw) / 2, minY + (h - ih) / 2, iw, ih);
+  ctx.restore();
+}
+
+function loop() {
+  const res = hands.detectForVideo(video, performance.now());
+
+  // mirrored webcam frame
+  ctx.save(); ctx.scale(-1, 1); ctx.drawImage(video, -canvas.width, 0); ctx.restore();
+
+  const tips = {};
+  res.landmarks.forEach((lm, i) => {
+    // MediaPipe assumes a mirrored input; raw webcam is not, so labels are swapped
+    const side = res.handednesses[i][0].categoryName === "Left" ? "Right" : "Left";
+    tips[side] = { thumb: point(lm, THUMB, side + "T"), index: point(lm, INDEX, side + "I") };
+  });
+
+  const L = tips.Left, R = tips.Right;
+  const visible = far(L?.thumb, R?.thumb) && far(L?.index, R?.index) && far(L?.thumb, L?.index) && far(R?.thumb, R?.index);
+
+  if (visible && !showing) { // just appeared → new random video from the start
+    clip = pickClip(); clip.currentTime = 0; clip.play();
+    statusEl.textContent = "Playing: " + clip.src.split("/").pop();
+  }
+  if (!visible && showing) { // just disappeared → stop
+    clip.pause();
+    statusEl.textContent = "Stopped";
+  }
+  showing = visible;
+
+  if (visible) drawImageInShape([L.thumb, R.thumb, R.index, L.index]);
+
+  // drawLine(L?.thumb, R?.thumb, "#d0a2cc"); 
+  // drawLine(L?.index, R?.index, "#d0a2cc"); 
+
+  // drawLine(L?.thumb, L?.index, "#d0a2cc"); 
+  // drawLine(R?.thumb, R?.index, "#d0a2cc"); 
+
+  // //fingertip nodes
+  // ctx.shadowBlur = 0; ctx.fillStyle = "#fff";
+  // for (const h of Object.values(tips)) for (const p of [h.thumb, h.index]) {
+  //   ctx.beginPath(); ctx.arc(p.x, p.y, 2, 0, Math.PI * 2); ctx.fill();
+  // }
+
+  requestAnimationFrame(loop);
+}
+</script>
+</body>
+</html>
